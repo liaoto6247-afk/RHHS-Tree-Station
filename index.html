@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RHHS Rejuvenation Station</title>
+<style>
+:root{font-family:system-ui,-apple-system,sans-serif;color:#183c32;background:#f3f6f0}*{box-sizing:border-box}body{margin:0}main{max-width:940px;margin:auto;padding:40px 22px}header{border-bottom:1px solid #cbd7cb;padding-bottom:25px}.eyebrow{font-size:12px;letter-spacing:2px;font-weight:700;color:#52745e}h1{font-size:clamp(30px,6vw,48px);letter-spacing:-1.5px;line-height:1.1;margin:12px 0}header p{color:#52665c;line-height:1.6;margin-bottom:0}.status{border:1px solid #cbd7cb;background:white;border-radius:14px;padding:18px;margin:24px 0;line-height:1.6}.status[data-state=live]{border-color:#6fa880;background:#e9f4e9}.status[data-state=warning]{border-color:#d5af6b;background:#fff5df}.status[data-state=error]{border-color:#d6a69f;background:#fff0ec}#lastUpdated{display:block;color:#52665c;font-size:14px}.grid{display:grid;grid-template-columns:repeat(6,1fr);gap:16px}.card{grid-column:span 2;background:white;border:1px solid #dce4d9;border-radius:18px;padding:24px}.card.tree{grid-column:span 3}.card h2{font-size:16px;font-weight:600;margin:0 0 20px}.value{font-size:40px;font-weight:650;letter-spacing:-1px}.unit{font-size:16px;color:#52665c;margin-left:5px}.hint{color:#63766a;font-size:13px;line-height:1.5;margin:14px 0 0}.footer{font-size:13px;color:#63766a;margin-top:24px;line-height:1.6}button{font:inherit;background:#1f5b43;color:white;border:0;border-radius:9px;padding:11px 16px;cursor:pointer;margin-top:15px}button:disabled{opacity:.6}@media(max-width:600px){main{padding:28px 16px}.grid{grid-template-columns:1fr 1fr;gap:12px}.card,.card.tree{grid-column:span 1;padding:19px}.card:last-child{grid-column:span 2}.value{font-size:34px}}
+</style>
+</head>
+<body><main>
+<header><div class="eyebrow">RHHS · LIVE PROTOTYPE</div><h1>Rejuvenation Station</h1><p>Two trees. Five readings. A closer look at their growing conditions.</p></header>
+<div class="status" id="statusBox" role="status" aria-live="polite"><strong id="status">Connecting…</strong><span id="lastUpdated">Waiting for the first reading.</span></div>
+<section class="grid" aria-label="Sensor readings">
+<article class="card tree"><h2>Tree 1 · Soil moisture</h2><span class="value" id="soil1Raw">—</span><span class="unit">raw</span><p class="hint">Lower readings generally mean wetter soil.</p></article>
+<article class="card tree"><h2>Tree 2 · Soil moisture</h2><span class="value" id="soil2Raw">—</span><span class="unit">raw</span><p class="hint">Lower readings generally mean wetter soil.</p></article>
+<article class="card"><h2>Temperature</h2><span class="value" id="temperature">—</span><span class="unit">°C</span><p class="hint" id="temperatureHint">Air temperature</p></article>
+<article class="card"><h2>Humidity</h2><span class="value" id="humidity">—</span><span class="unit">%</span><p class="hint" id="humidityHint">Relative humidity</p></article>
+<article class="card"><h2>Light</h2><span class="value" id="lightRaw">—</span><span class="unit">raw</span><p class="hint">Higher means brighter with the supplied photoresistor wiring.</p></article>
+</section>
+<button id="refresh" type="button">Refresh now</button>
+<p class="footer">Checks for readings every 15 seconds. Soil and light are sensor readings on a 0–1023 scale, not percentages. Readings older than 90 seconds are marked offline.</p>
+</main>
+<script>
+// CHANGE THIS ONE LINE. Use the same full database URL as the board.
+const DATABASE_URL = "https://YOUR_DATABASE_URL";
+const keys = ['soil1Raw','soil2Raw','temperature','humidity','lightRaw'];
+let latest = null, requestError = '', busy = false;
+const el = id => document.getElementById(id);
+function setStatus(message, state) { el('status').textContent = message; el('statusBox').dataset.state = state; }
+function renderStatus() {
+  if (requestError) { setStatus(requestError, 'error'); return; }
+  if (!latest) { setStatus('Waiting for the station’s first upload.', 'warning'); return; }
+  const age = Date.now() - latest.updatedAt;
+  if (age < -60000) { setStatus('Check the date and time on this device.', 'warning'); return; }
+  setStatus(age > 90000 ? 'Station offline — showing last readings.' : 'Station online · Readings received', age > 90000 ? 'warning' : 'live');
+}
+function validReading(data) {
+  return data && typeof data === 'object' && Number.isFinite(data.updatedAt) &&
+    data.updatedAt > 0 && ['soil1Raw','soil2Raw','lightRaw'].every(k => Number.isFinite(data[k]) && data[k]>=0 && data[k]<=1023) &&
+    (data.temperature == null || (Number.isFinite(data.temperature) && data.temperature>=-40 && data.temperature<=80)) &&
+    (data.humidity == null || (Number.isFinite(data.humidity) && data.humidity>=0 && data.humidity<=100));
+}
+async function refresh() {
+  if (busy) return;
+  let root;
+  try {
+    root = new URL(DATABASE_URL.trim());
+    if (root.protocol !== 'https:' || !/\.(firebasedatabase\.app|firebaseio\.com)$/.test(root.hostname) || root.pathname !== '/' || root.search || root.hash) throw Error();
+  } catch {
+    requestError = 'Setup needed: add your Realtime Database URL to index.html.';
+    renderStatus(); return;
+  }
+  busy = true; el('refresh').disabled = true;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const response = await fetch(root.origin + '/station/latest.json', {cache:'no-store', signal:controller.signal});
+    if (!response.ok) throw new Error(response.status===401 || response.status===403 ? 'Database access denied. Check the Firebase Rules.' : 'Database request failed (HTTP '+response.status+').');
+    const data = await response.json();
+    if (data !== null && !validReading(data)) throw new Error('Unexpected readings. Check that the matching board code is uploaded.');
+    latest = data; requestError = '';
+    for (const key of keys) el(key).textContent = data && Number.isFinite(data[key]) ? (key==='temperature' || key==='humidity' ? data[key].toFixed(1) : String(data[key])) : '—';
+    el('temperatureHint').textContent = data && data.temperature == null ? 'Sensor not reading · check DHT11' : 'Air temperature';
+    el('humidityHint').textContent = data && data.humidity == null ? 'Sensor not reading · check DHT11' : 'Relative humidity';
+    el('lastUpdated').textContent = data ? 'Last updated: '+new Date(data.updatedAt).toLocaleString('en-AU') : 'No readings saved yet. Power the board and check Serial Monitor.';
+  } catch(error) {
+    requestError = error.name==='AbortError' ? 'Connection timed out — any displayed readings are from the last successful check.' : (error instanceof TypeError ? 'Cannot reach the database — check your internet. Any displayed readings are from the last successful check.' : error.message);
+  } finally { clearTimeout(timeout); busy=false; el('refresh').disabled=false; renderStatus(); }
+}
+el('refresh').addEventListener('click', refresh);
+refresh(); setInterval(refresh,15000); setInterval(renderStatus,1000);
+</script></body></html>
